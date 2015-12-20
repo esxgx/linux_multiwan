@@ -1,0 +1,60 @@
+#! /bin/bash
+
+getip() {
+	ifconfig $1 |grep -o -e 'inet addr:[^ ]*' | grep -o -e '[^:]*$'
+}
+
+ip link add link br0 address 00:16:3e:aa:bb:xx dev veth0 type macvlan
+ip link add link br0 address 00:16:3e:aa:bb:yy dev veth1 type macvlan
+ip link add link br0 address 00:16:3e:aa:bb:zz dev veth2 type macvlan
+dhclient veth0 veth1 veth2
+
+iptables -t mangle -N PREROUTING_INPUT
+iptables -t mangle -N POSTROUTING_GUESS
+
+IPROUTE_ARGS=""
+
+for((i=0;i<3;++i)); do
+	for ((j=0;j<15;++j)); do
+		IP="$(getip veth$i)"
+		[[ -n $IP ]] && break
+		sleep 3
+	done
+	[[ -z $IP ]] && continue
+	GATEWAY="${IP%.[0-9]*}.254"
+
+	iptables -t mangle -A PREROUTING_INPUT -i veth$i -j MARK --set-mark $[$i+0x100]
+	iptables -t mangle -A PREROUTING_INPUT -i veth$i -j ACCEPT
+
+	iptables -t mangle -A POSTROUTING_GUESS -o veth$i -j MARK --set-mark $[$i+0x100]
+
+	ip route add default via $GATEWAY dev veth$i table veth$i 
+	ip rule add from $IP table veth$i
+	ip rule add to $IP table veth$i
+	ip rule add fwmark $[$i+0x100] table veth$i
+	IPROUTE_ARGS=$IPROUTE_ARGS" nexthop via "$GATEWAY" dev veth"$i" weight 1"
+done
+
+# Connections can not change link, get link from saved mark, even for
+# incoming traffic
+iptables -t mangle -A PREROUTING -m conntrack --ctstate ESTABLISHED,RELATED -j CONNMARK --restore-mark
+
+# Select link if not selected yet. NEW state can match conns even after reboot.
+# Even for incoming connections destined to local address.
+iptables -t mangle -A PREROUTING -m state --state NEW -j PREROUTING_INPUT
+
+# Connection has no mark from PREROUTING, see which link is selected by routing
+iptables -t mangle -A POSTROUTING -m state --state NEW -m mark --mark 0 -j POSTROUTING_GUESS
+
+# Save mark in conntrack when connection is created
+iptables -t mangle -A POSTROUTING -m conntrack --ctstate NEW -j CONNMARK --save-mark
+
+
+ip route replace default scope global table default equalize $IPROUTE_ARGS
+
+# Remove default route from table main
+ip route del default table main
+
+# Add main table at top.
+ip rule add from all lookup main
+
