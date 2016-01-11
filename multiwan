@@ -21,14 +21,20 @@ for((i=0;i<3;++i)); do
 		sleep 3
 	done
 	[[ -z $IP ]] && continue
-	GATEWAY="${IP%.[0-9]*}.254"
+
+	SUBNET="${IP%.[0-9]*}"
+	GATEWAY="${SUBNET}.254"
 
 	iptables -t mangle -A PREROUTING_INPUT -i veth$i -j MARK --set-mark $[$i+0x100]
 	iptables -t mangle -A PREROUTING_INPUT -i veth$i -j ACCEPT
 
 	iptables -t mangle -A POSTROUTING_GUESS -o veth$i -j MARK --set-mark $[$i+0x100]
 
-	ip route add default via $GATEWAY dev veth$i table veth$i 
+	ip route append "${SUBNET}.0/24" dev veth$i src $IP table default &&
+	ip route del "${SUBNET}.0/24" dev veth$i table main
+
+	ip route add default via $GATEWAY dev veth$i table veth$i
+
 	ip rule add from $IP table veth$i
 	ip rule add to $IP table veth$i
 	ip rule add fwmark $[$i+0x100] table veth$i
